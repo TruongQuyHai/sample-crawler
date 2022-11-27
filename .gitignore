@@ -1,0 +1,5 @@
+.env
+env
+database.ini
+__pycache__
+*.csv
