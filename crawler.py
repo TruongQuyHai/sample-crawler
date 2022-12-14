@@ -24,106 +24,131 @@ PACKAGES_PER_PAGE = 100
 
 
 def run():
-    offset = 0
-    index = 0
-
-    # 0. get doc_count via https://replicate.npmjs.com/
-    r = requests.get("https://replicate.npmjs.com/")
-    # total_packages = r.json().get("doc_count")
-    total_packages = r.json().get("doc_count")
-
+    print("Start running")
     with open(f'data.csv', 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["index", "id", "name", "description", "npm_readme", "gh_readme", "author", "final_score", "quality",
-                            "popularity", "maintenance", "search_score", "stargazers_count", "watchers_count", "forks_count"])
+                         "popularity", "maintenance", "search_score", "stargazers_count", "watchers_count", "forks_count"])
 
-    for _ in range(math.ceil(total_packages / PACKAGES_PER_PAGE)):
-        # 1. crawl 10 packages by https://replicate.npmjs.com/_all_docs?limit=10
-        r = requests.get(
-            f"https://replicate.npmjs.com/_all_docs?limit={PACKAGES_PER_PAGE}&skip={offset}")        
-        offset += PACKAGES_PER_PAGE
-        ids = list(map(lambda package: package.get("id"), r.json().get("rows")))
+    print(">>>> 1. request to https://replicate.npmjs.com/_all_docs")
+    # 1. crawl all packages by https://replicate.npmjs.com/_all_docs stream = True
+    all_docs_request = requests.get(
+        f"https://replicate.npmjs.com/_all_docs", stream=True)
+    all_docs_request.raw.chunked = True
+    all_docs_request.encoding = 'utf-8'
 
+    is_first_line = True
+    index = 0
+
+    print(">>>> Request streaming")
+    for line in all_docs_request.iter_lines():
+        print(f">>>> Line: {index + 1}")
+        if is_first_line or not line:
+            is_first_line = False
+            continue
+
+        decoded_line = line.decode('utf-8')[:-1]
+        package_metadata_dict = json.loads(decoded_line)
+        id = package_metadata_dict.get('id')
         # 2. for each package take the id or key and then call the following link: https://registry.npmjs.org/{key}
-        for id in ids:
-            row = []
-            r = requests.get(f"https://registry.npmjs.org/{id}")
+        row = []
 
-            #   2.a Save id, name, description, latest dist-tags readme and github homepage readme
-            package = r.json()
-            name = package.get("name")
-            latest = package.get("dist-tags").get("latest")
-            description = package.get("versions").get(
-                latest).get("description")
-            npm_readme = package.get("readme")
-            gh_readme_url = package.get("homepage")
-            author = package.get("author", {"name": ""}).get("name")
+        print(">>>> Package detail request")
+        package_request = requests.get(f"https://registry.npmjs.org/{id}")
+        package_request.raw.chunked = True
+        package_request.encoding = 'utf-8'
 
-            if npm_readme == "ERROR: No README data found!":
-                npm_readme = ""
+        #   2.a Save id, name, description, latest dist-tags readme and github homepage readme
+        package_dict = package_request.json()
+        name = package_dict.get("name")
+        latest = package_dict.get("dist-tags").get("latest")
+        description = package_dict.get("versions").get(
+            latest).get("description")
+        npm_readme = package_dict.get("readme")
+        gh_readme_url = package_dict.get("homepage")
+        author = package_dict.get("author", {"name": ""}).get("name")
 
-            # 3. for each package take the id or key and then call the following link: https://registry.npmjs.org/-/v1/search?text={key}
-            r = requests.get(
-                f"https://registry.npmjs.org/-/v1/search?text={re.sub('[^A-Za-z0-9]+', '', id)}")
-            objects = r.json().get("objects")
-            scores = [0] * 5
-            for obj in objects:
-                #   3.a If package is the same name => save keywords
-                #   3.a final score, quality, popularity, maintenance, searchScore
-                package = obj.get("package")
-                score = obj.get("score")
-                final_score = score.get("final")
-                detail_score = score.get("detail")
-                quality = detail_score.get("quality")
-                popularity = detail_score.get("popularity")
-                maintenance = detail_score.get("maintenance")
-                search_score = obj.get("searchScore")
+        if npm_readme == "ERROR: No README data found!":
+            npm_readme = ""
 
-                if package.get("name") == name:
-                    scores = [final_score, quality,
-                              popularity, maintenance, search_score]
-                    break
+        # 3. for each package take the id or key and then call the following link: https://registry.npmjs.org/-/v1/search?text={key}
+        print(">>>> Search request")
+        search_request = requests.get(
+            f"https://registry.npmjs.org/-/v1/search?text={re.sub('[^A-Za-z0-9]+', '', id)}")
+        search_request.raw.chunked = True
+        search_request.encoding = 'utf-8'
 
-            # 4 Use the homepage url to call to https://api.github.com/repos/<user>/<repo_name>/contents/README.md and call to download_url to download the file
-            if gh_readme_url is not None:
-                hash_index = gh_readme_url.find("#")
-                if hash_index == -1:
-                    url = f"https://api.github.com/repos/{gh_readme_url[19:]}/contents/README.md"
-                else:
-                    url = f"https://api.github.com/repos/{gh_readme_url[19:hash_index]}/contents/README.md"
-                headers = {"Authorization": f"Bearer {GH_ACCESS_TOKEN}"}
+        objects = search_request.json().get("objects")
+        scores = [0] * 5
+        for obj in objects:
+            #   3.a If package is the same name => save keywords
+            #   3.b final score, quality, popularity, maintenance, searchScore
+            package = obj.get("package")
+            score = obj.get("score")
+            final_score = score.get("final")
+            detail_score = score.get("detail")
+            quality = detail_score.get("quality")
+            popularity = detail_score.get("popularity")
+            maintenance = detail_score.get("maintenance")
+            search_score = obj.get("searchScore")
 
-                r = requests.get(url, headers=headers)
-                if r.status_code == 200:
-                    download_url = r.json().get("download_url")
-                    r = requests.get(download_url)
-                    gh_readme = r.text
-                else:
-                    gh_readme = ""
+            if package.get("name") == name:
+                scores = [final_score, quality,
+                          popularity, maintenance, search_score]
+                break
 
-                # 5 Use the homepage url to call to https://api.github.com/repos/<user>/<repo_name> to get stargazers_count, forks, watchers
-                r = requests.get(url[:-19], headers=headers)
-                if r.status_code == 200:
-                    obj = r.json()
-                    stargazers_count = obj.get("stargazers_count")
-                    watchers_count = obj.get("watchers_count")
-                    forks_count = obj.get("forks_count")
-                else:
-                    stargazers_count = 0
-                    watchers_count = 0
-                    forks_count = 0
+        # 4 Use the homepage url to call to https://api.github.com/repos/<user>/<repo_name>/contents/README.md and call to download_url to download the file
+        if gh_readme_url is not None:
+            hash_index = gh_readme_url.find("#")
+            if hash_index == -1:
+                url = f"https://api.github.com/repos/{gh_readme_url[19:]}/contents/README.md"
+            else:
+                url = f"https://api.github.com/repos/{gh_readme_url[19:hash_index]}/contents/README.md"
+            headers = {"Authorization": f"Bearer {GH_ACCESS_TOKEN}"}
+
+            print(">>>> readme request")
+            readme_request = requests.get(url, headers=headers)
+            readme_request.raw.chunked = True
+            readme_request.encoding = 'utf-8'
+
+            if readme_request.status_code == 200:
+                download_url = readme_request.json().get("download_url")
+                readme_request = requests.get(download_url)
+                readme_request.raw.chunked = True
+                readme_request.encoding = 'utf-8'
+
+                gh_readme = readme_request.text
             else:
                 gh_readme = ""
+
+            # 5 Use the homepage url to call to https://api.github.com/repos/<user>/<repo_name> to get stargazers_count, forks, watchers
+            print(">>>> Stats request")
+            stats_request = requests.get(url[:-19], headers=headers)
+            stats_request.raw.chunked = True
+            stats_request.encoding = 'utf-8'
+
+            if stats_request.status_code == 200:
+                obj = stats_request.json()
+                stargazers_count = obj.get("stargazers_count")
+                watchers_count = obj.get("watchers_count")
+                forks_count = obj.get("forks_count")
+            else:
                 stargazers_count = 0
                 watchers_count = 0
                 forks_count = 0
+        else:
+            gh_readme = ""
+            stargazers_count = 0
+            watchers_count = 0
+            forks_count = 0
 
-            index += 1
-            row += [index, id, name, description, npm_readme, gh_readme, author] + \
-                scores + [stargazers_count, watchers_count, forks_count]
-            with open(f'data.csv', 'a', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(row)
+        index += 1
+        row += [index, id, name, description, npm_readme, gh_readme, author] + \
+            scores + [stargazers_count, watchers_count, forks_count]
+        print(f"Done fetching data: \n{row}")
+        with open(f'data.csv', 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(row)
+        print("===================================================================")
 
-        print("Sleep")
-        time.sleep(2)
+    print("End running")
